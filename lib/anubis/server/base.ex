@@ -602,7 +602,7 @@ defmodule Anubis.Server.Base do
           {:ok, {session :: Session.t(), t}}
   defp maybe_attach_session(session_id, context, %{sessions: sessions} = state) when is_map_key(sessions, session_id) do
     {session_name, _ref} = sessions[session_id]
-    session = Session.get(session_name)
+    session = Session.refresh_from_store(session_name, session_id)
     state = reset_session_expiry(session_id, state)
 
     {:ok, {session, %{state | frame: populate_frame(state.frame, session, context, state)}}}
@@ -622,7 +622,7 @@ defmodule Anubis.Server.Base do
 
         state = reset_session_expiry(session_id, state)
 
-        session = Session.get(session_name)
+        session = Session.refresh_from_store(session_name, session_id)
 
         {:ok, {session, %{state | frame: populate_frame(state.frame, session, context, state)}}}
 
@@ -636,7 +636,7 @@ defmodule Anubis.Server.Base do
 
         state = reset_session_expiry(session_id, state)
 
-        session = Session.get(session_name)
+        session = Session.refresh_from_store(session_name, session_id)
 
         {:ok, {session, %{state | frame: populate_frame(state.frame, session, context, state)}}}
 

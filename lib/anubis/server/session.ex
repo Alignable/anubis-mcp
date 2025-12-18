@@ -183,6 +183,54 @@ defmodule Anubis.Server.Session do
     Agent.get(session, & &1.pending_requests)
   end
 
+  @doc """
+  Refreshes session state from the session store.
+
+  When a session store is configured, this loads the current state from the store
+  and updates the local Agent. This ensures multi-server deployments always have
+  consistent initialization state.
+
+  Local runtime fields like `pending_requests` are preserved.
+
+  Returns the updated session state.
+  """
+  @spec refresh_from_store(GenServer.name(), String.t()) :: t()
+  def refresh_from_store(session, session_id) do
+    maybe_sync_from_store(session, session_id)
+    Agent.get(session, & &1)
+  end
+
+  defp maybe_sync_from_store(session, session_id) do
+    with store when not is_nil(store) <- Anubis.get_session_store_adapter(),
+         {:ok, stored_state} <- store.load(session_id, []) do
+      Agent.update(session, &merge_stored_state(&1, stored_state))
+    else
+      nil -> :ok
+      {:error, _reason} -> Logging.log(:debug, "Could not refresh session from store", session_id: session_id)
+    end
+  end
+
+  defp merge_stored_state(current_state, stored_state) do
+    %{
+      current_state
+      | initialized: get_stored_field(stored_state, "initialized", :initialized, current_state.initialized),
+        protocol_version:
+          get_stored_field(stored_state, "protocol_version", :protocol_version, current_state.protocol_version),
+        client_info: get_stored_field(stored_state, "client_info", :client_info, current_state.client_info),
+        client_capabilities:
+          get_stored_field(stored_state, "client_capabilities", :client_capabilities, current_state.client_capabilities),
+        log_level: get_stored_field(stored_state, "log_level", :log_level, current_state.log_level)
+    }
+  end
+
+  defp get_stored_field(state, string_key, atom_key, default) when is_map(state) do
+    cond do
+      is_map_key(state, string_key) and not is_nil(state[string_key]) -> state[string_key]
+      is_map_key(state, atom_key) and not is_nil(state[atom_key]) -> state[atom_key]
+      true -> default
+    end
+  end
+
   # Private persistence functions
 
   defp maybe_restore_session(session_id, name, server_module) do

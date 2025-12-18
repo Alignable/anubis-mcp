@@ -117,7 +117,7 @@ defmodule Anubis.Server.Session.StoreTest do
       assert session.initialized == true
       assert session.client_info["name"] == "legacy_client"
       # log_level should have a default value, not nil
-      assert session.log_level != nil
+      assert session.log_level
       assert is_binary(session.log_level)
     end
 
@@ -270,6 +270,134 @@ defmodule Anubis.Server.Session.StoreTest do
       Session.mark_initialized(session_name)
       session = Session.get(session_name)
       assert session.initialized == true
+    end
+  end
+
+  describe "refresh_from_store/2" do
+    test "updates initialized flag when store has newer state" do
+      session_id = "refresh_test_session"
+      start_supervised!({Registry, keys: :unique, name: TestSessionRegistryRefresh})
+      session_name = {:via, Registry, {TestSessionRegistryRefresh, session_id}}
+
+      # Start session (will be uninitialized)
+      start_supervised!({Session, session_id: session_id, name: session_name, server_module: TestServer})
+
+      # Verify session is not initialized
+      session = Session.get(session_name)
+      assert session.initialized == false
+
+      # Simulate another server initializing the session (update store directly)
+      updated_data = %{
+        id: session_id,
+        protocol_version: "2024-11-21",
+        initialized: true,
+        client_info: %{"name" => "remote_client"},
+        client_capabilities: %{"tools" => %{}},
+        log_level: "info",
+        pending_requests: %{}
+      }
+
+      :ok = MockSessionStore.save(session_id, updated_data, [])
+
+      # Refresh from store
+      refreshed_session = Session.refresh_from_store(session_name, session_id)
+
+      # Should now be initialized with data from store
+      assert refreshed_session.initialized == true
+      assert refreshed_session.protocol_version == "2024-11-21"
+      assert refreshed_session.client_info["name"] == "remote_client"
+    end
+
+    test "preserves local pending_requests when refreshing from store" do
+      session_id = "refresh_preserve_local"
+      start_supervised!({Registry, keys: :unique, name: TestSessionRegistryRefreshLocal})
+      session_name = {:via, Registry, {TestSessionRegistryRefreshLocal, session_id}}
+
+      # Start session
+      start_supervised!({Session, session_id: session_id, name: session_name, server_module: TestServer})
+
+      # Add a pending request locally
+      Session.track_request(session_name, "req_123", "tools/list")
+
+      # Store has different data (no pending_requests since they're not persisted)
+      stored_data = %{
+        "id" => session_id,
+        "initialized" => true,
+        "protocol_version" => "2024-11-21",
+        "log_level" => "info",
+        "pending_requests" => %{}
+      }
+
+      :ok = MockSessionStore.save(session_id, stored_data, [])
+
+      # Refresh from store
+      refreshed_session = Session.refresh_from_store(session_name, session_id)
+
+      # Should have updated initialized state but preserve local pending_requests
+      assert refreshed_session.initialized == true
+      assert Map.has_key?(refreshed_session.pending_requests, "req_123")
+    end
+
+    test "handles store errors gracefully" do
+      session_id = "refresh_error_session"
+      start_supervised!({Registry, keys: :unique, name: TestSessionRegistryRefreshError})
+      session_name = {:via, Registry, {TestSessionRegistryRefreshError, session_id}}
+
+      # Start session and initialize it locally
+      start_supervised!({Session, session_id: session_id, name: session_name, server_module: TestServer})
+      Session.mark_initialized(session_name)
+
+      # Delete from store to simulate error scenario (session not in store)
+      MockSessionStore.delete(session_id, [])
+
+      # Refresh should keep local state when store load fails
+      refreshed_session = Session.refresh_from_store(session_name, session_id)
+      assert refreshed_session.initialized == true
+    end
+
+    test "works without store configured" do
+      # Remove store configuration
+      Application.delete_env(:anubis_mcp, :session_store)
+
+      session_id = "no_store_refresh_session"
+      start_supervised!({Registry, keys: :unique, name: TestSessionRegistryNoStoreRefresh})
+      session_name = {:via, Registry, {TestSessionRegistryNoStoreRefresh, session_id}}
+
+      start_supervised!({Session, session_id: session_id, name: session_name, server_module: TestServer})
+
+      # Should work fine and just return current state
+      session = Session.refresh_from_store(session_name, session_id)
+      assert session.initialized == false
+    end
+
+    test "handles string keys from JSON-decoded store data" do
+      session_id = "refresh_string_keys"
+      start_supervised!({Registry, keys: :unique, name: TestSessionRegistryStringKeys})
+      session_name = {:via, Registry, {TestSessionRegistryStringKeys, session_id}}
+
+      # Start session
+      start_supervised!({Session, session_id: session_id, name: session_name, server_module: TestServer})
+
+      # Store data with string keys (as would come from JSON decode)
+      stored_data = %{
+        "id" => session_id,
+        "initialized" => true,
+        "protocol_version" => "2024-11-21",
+        "client_info" => %{"name" => "json_client"},
+        "client_capabilities" => %{},
+        "log_level" => "debug"
+      }
+
+      :ok = MockSessionStore.save(session_id, stored_data, [])
+
+      # Refresh from store
+      refreshed_session = Session.refresh_from_store(session_name, session_id)
+
+      # Should correctly parse string keys
+      assert refreshed_session.initialized == true
+      assert refreshed_session.protocol_version == "2024-11-21"
+      assert refreshed_session.client_info["name"] == "json_client"
+      assert refreshed_session.log_level == "debug"
     end
   end
 end
